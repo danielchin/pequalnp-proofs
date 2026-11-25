@@ -64,9 +64,29 @@ jobs:
               exit 1
             fi
 
+            # Check if we already opened a PR for this branch
             existing=$(gh api "repos/${UPSTREAM}/pulls?state=all&head=${OWNER}:${gap}" --jq '.[0].html_url // empty')
             if [ -n "$existing" ]; then
-              echo "PR already exists for ${gap}: ${existing}"
+              echo "PR already exists from ${OWNER} for ${gap}: ${existing}"
+              continue
+            fi
+
+            # Check if ANYONE already has an open or merged PR for this gap on upstream
+            other_open=$(gh pr list -R "${UPSTREAM}" --state open --search "\"${gap}\" in:title" --json number,title,url --jq "[.[] | select(.title == \"${gap}\" or (.title | contains(\"${gap}\")))][0].url // empty")
+            if [ -n "$other_open" ]; then
+              echo "Skipping ${gap}: another open PR already exists on ${UPSTREAM}: ${other_open}"
+              if [ -n "$lease" ]; then
+                curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=other" >/dev/null || true
+              fi
+              continue
+            fi
+
+            other_merged=$(gh pr list -R "${UPSTREAM}" --state merged --search "\"${gap}\" in:title" --json number,title,url --jq "[.[] | select(.title == \"${gap}\" or (.title | contains(\"${gap}\")))][0].url // empty")
+            if [ -n "$other_merged" ]; then
+              echo "Skipping ${gap}: a merged PR already exists on ${UPSTREAM}: ${other_merged}"
+              if [ -n "$lease" ]; then
+                curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=other" >/dev/null || true
+              fi
               continue
             fi
 
