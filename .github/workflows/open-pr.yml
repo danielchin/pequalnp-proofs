@@ -1,0 +1,99 @@
+name: Open Upstream Proof PR
+
+on:
+  push:
+    branches:
+      - pr-bot
+    paths:
+      - 'requests/*.json'
+
+permissions:
+  contents: read
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pr-bot branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check secret
+        env:
+          UPSTREAM_PR_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_PR_TOKEN" ]; then
+            echo "::error::Missing repository secret UPSTREAM_PR_TOKEN (classic PAT with public_repo scope)."
+            exit 1
+          fi
+
+      - name: Open PRs for new request files
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          UPSTREAM="open-goat/pequalnp-proofs"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          DESK="https://pequalnp.com/desk"
+
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            FILES=$(find requests -maxdepth 1 -name '*.json' -type f | sort)
+          else
+            FILES=$(git diff --name-only --diff-filter=AM "$BEFORE_SHA" "$AFTER_SHA" -- 'requests/*.json' | sort)
+          fi
+
+          if [ -z "$FILES" ]; then
+            echo "No new request files in this push."
+            exit 0
+          fi
+
+          for f in $FILES; do
+            echo "=== Processing $f ==="
+            gap=$(jq -r '.gap // empty' "$f")
+            lease=$(jq -r '.lease // empty' "$f")
+
+            if [[ ! "$gap" =~ ^L-[A-Za-z0-9-]+$ ]]; then
+              echo "::error::Invalid gap ID in $f: $gap"
+              exit 1
+            fi
+            if [[ -n "$lease" && ! "$lease" =~ ^[A-Za-z0-9-]{1,64}$ ]]; then
+              echo "::error::Invalid lease ID in $f"
+              exit 1
+            fi
+
+            existing=$(gh api "repos/${UPSTREAM}/pulls?state=all&head=${OWNER}:${gap}" --jq '.[0].html_url // empty')
+            if [ -n "$existing" ]; then
+              echo "PR already exists for ${gap}: ${existing}"
+              continue
+            fi
+
+            if [ -n "$lease" ]; then
+              beat_resp=$(curl -sS -m 10 -X POST "${DESK}/beat?lease=${lease}" 2>/dev/null || true)
+              if echo "$beat_resp" | jq -e '.withdrawn == true' >/dev/null 2>&1; then
+                echo "Skipping ${gap}: lease reports step was withdrawn."
+                continue
+              fi
+            fi
+
+            body=""
+            if [ -n "$lease" ]; then
+              body="Lease: ${lease}"
+            fi
+
+            pr_url=$(gh api --method POST "repos/${UPSTREAM}/pulls" \
+              -f title="${gap}" \
+              -f head="${OWNER}:${gap}" \
+              -f base="main" \
+              -f body="${body}" \
+              --jq '.html_url')
+            echo "Opened PR for ${gap}: ${pr_url}"
+
+            if [ -n "$lease" ]; then
+              curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=submitted" >/dev/null \
+                && echo "Released lease for ${gap} as submitted." \
+                || echo "::warning::PR opened (${pr_url}), but desk release call failed."
+            fi
+          done
