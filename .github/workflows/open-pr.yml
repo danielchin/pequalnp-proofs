@@ -14,36 +14,24 @@ jobs:
   open-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout pr-bot branch
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check secret
+      - name: Open PRs for new request files
         env:
-          UPSTREAM_PR_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMITS_JSON: ${{ toJson(github.event.commits) }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
-          if [ -z "$UPSTREAM_PR_TOKEN" ]; then
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::Missing repository secret UPSTREAM_PR_TOKEN (classic PAT with public_repo scope)."
             exit 1
           fi
 
-      - name: Open PRs for new request files
-        env:
-          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
           UPSTREAM="open-goat/pequalnp-proofs"
           OWNER="${GITHUB_REPOSITORY_OWNER}"
           DESK="https://pequalnp.com/desk"
 
-          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            FILES=$(find requests -maxdepth 1 -name '*.json' -type f | sort)
-          else
-            FILES=$(git diff --name-only --diff-filter=AM "$BEFORE_SHA" "$AFTER_SHA" -- 'requests/*.json' | sort)
-          fi
+          FILES=$(echo "$COMMITS_JSON" | jq -r '[.[] | (.added[]?, .modified[]?)] | unique | .[] | select(startswith("requests/") and endswith(".json"))')
 
           if [ -z "$FILES" ]; then
             echo "No new request files in this push."
@@ -52,8 +40,9 @@ jobs:
 
           for f in $FILES; do
             echo "=== Processing $f ==="
-            gap=$(jq -r '.gap // empty' "$f")
-            lease=$(jq -r '.lease // empty' "$f")
+            content=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/contents/${f}?ref=${AFTER_SHA}" --jq '.content' | tr -d '\n' | base64 -d)
+            gap=$(echo "$content" | jq -r '.gap // empty')
+            lease=$(echo "$content" | jq -r '.lease // empty')
 
             if [[ ! "$gap" =~ ^L-[A-Za-z0-9-]+$ ]]; then
               echo "::error::Invalid gap ID in $f: $gap"
@@ -64,38 +53,14 @@ jobs:
               exit 1
             fi
 
-            # Check if we already opened a PR for this branch
-            existing=$(gh api "repos/${UPSTREAM}/pulls?state=all&head=${OWNER}:${gap}" --jq '.[0].html_url // empty')
-            if [ -n "$existing" ]; then
-              echo "PR already exists from ${OWNER} for ${gap}: ${existing}"
-              continue
-            fi
-
-            # Check if ANYONE already has an open or merged PR for this gap on upstream
-            other_open=$(gh pr list -R "${UPSTREAM}" --state open --search "\"${gap}\" in:title" --json number,title,url --jq "[.[] | select(.title == \"${gap}\" or (.title | contains(\"${gap}\")))][0].url // empty")
-            if [ -n "$other_open" ]; then
-              echo "Skipping ${gap}: another open PR already exists on ${UPSTREAM}: ${other_open}"
+            # Single fast duplicate check: open or merged PR from anyone for this gap on upstream
+            dup=$(gh pr list -R "${UPSTREAM}" --state all --search "\"${gap}\" in:title" --json number,title,url,state --jq "[.[] | select((.state == \"OPEN\" or .state == \"MERGED\") and (.title == \"${gap}\" or (.title | contains(\"${gap}\"))))][0].url // empty")
+            if [ -n "$dup" ]; then
+              echo "Skipping ${gap}: existing open/merged PR on ${UPSTREAM}: ${dup}"
               if [ -n "$lease" ]; then
-                curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=other" >/dev/null || true
+                curl -fsS -m 10 -X POST "${DESK}/release?lease=${lease}&reason=other" >/dev/null || true
               fi
               continue
-            fi
-
-            other_merged=$(gh pr list -R "${UPSTREAM}" --state merged --search "\"${gap}\" in:title" --json number,title,url --jq "[.[] | select(.title == \"${gap}\" or (.title | contains(\"${gap}\")))][0].url // empty")
-            if [ -n "$other_merged" ]; then
-              echo "Skipping ${gap}: a merged PR already exists on ${UPSTREAM}: ${other_merged}"
-              if [ -n "$lease" ]; then
-                curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=other" >/dev/null || true
-              fi
-              continue
-            fi
-
-            if [ -n "$lease" ]; then
-              beat_resp=$(curl -sS -m 10 -X POST "${DESK}/beat?lease=${lease}" 2>/dev/null || true)
-              if echo "$beat_resp" | jq -e '.withdrawn == true' >/dev/null 2>&1; then
-                echo "Skipping ${gap}: lease reports step was withdrawn."
-                continue
-              fi
             fi
 
             body=""
@@ -112,7 +77,7 @@ jobs:
             echo "Opened PR for ${gap}: ${pr_url}"
 
             if [ -n "$lease" ]; then
-              curl -fsS -m 15 -X POST "${DESK}/release?lease=${lease}&reason=submitted" >/dev/null \
+              curl -fsS -m 10 -X POST "${DESK}/release?lease=${lease}&reason=submitted" >/dev/null \
                 && echo "Released lease for ${gap} as submitted." \
                 || echo "::warning::PR opened (${pr_url}), but desk release call failed."
             fi
