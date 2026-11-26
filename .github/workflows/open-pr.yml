@@ -18,7 +18,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMITS_JSON: ${{ toJson(github.event.commits) }}
+          BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -31,7 +31,10 @@ jobs:
           OWNER="${GITHUB_REPOSITORY_OWNER}"
           DESK="https://pequalnp.com/desk"
 
-          FILES=$(echo "$COMMITS_JSON" | jq -r '[.[] | (.added[]?, .modified[]?)] | unique | .[] | select(startswith("requests/") and endswith(".json"))')
+          FILES=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE_SHA}...${AFTER_SHA}" \
+            --jq '.files[] | select(.status != "removed") | .filename | select(startswith("requests/") and endswith(".json"))' 2>/dev/null || \
+            GH_TOKEN="$GITHUB_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/commits/${AFTER_SHA}" \
+            --jq '.files[] | select(.status != "removed") | .filename | select(startswith("requests/") and endswith(".json"))')
 
           if [ -z "$FILES" ]; then
             echo "No new request files in this push."
