@@ -56,8 +56,9 @@ jobs:
               exit 1
             fi
 
-            # Single fast duplicate check: open or merged PR from anyone for this gap on upstream
-            dup=$(gh pr list -R "${UPSTREAM}" --state all --search "\"${gap}\" in:title" --json number,title,url,state --jq "[.[] | select((.state == \"OPEN\" or .state == \"MERGED\") and (.title == \"${gap}\" or (.title | contains(\"${gap}\"))))][0].url // empty")
+            # Single fast duplicate check: open or merged PROOF PR (ignoring R_meta reduction PRs!) for this gap on upstream
+            mod="${gap//-/_}"
+            dup=$(gh pr list -R "${UPSTREAM}" --state all --search "\"${gap}\" in:title" --json number,title,url,state,files --jq "[.[] | select((.state == \"OPEN\" or .state == \"MERGED\") and (.title == \"${gap}\" or (.title | contains(\"${gap}\"))) and (([.files[].path] | any(endswith(\"/${mod}.lean\"))) or (.files | length == 0)))][0].url // empty")
             if [ -n "$dup" ]; then
               echo "Skipping ${gap}: existing open/merged PR on ${UPSTREAM}: ${dup}"
               if [ -n "$lease" ]; then
